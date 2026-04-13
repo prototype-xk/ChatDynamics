@@ -18,7 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.concurrent.CompletableFuture; // Import indispensable
+import java.util.concurrent.CompletableFuture;
 
 public class CDConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger(CDConfig.class);
@@ -35,7 +35,6 @@ public class CDConfig {
     public static Item itemRecompense = Items.DIAMOND;
     public static int quantiteRecompense = 1;
 
-    // On utilise des Maps synchronisées pour éviter les crashs si 2 joueurs répondent en même temps
     public static Map<UUID, Integer> leaderboard = Collections.synchronizedMap(new HashMap<>());
     public static Map<UUID, String> nomsCache = Collections.synchronizedMap(new HashMap<>());
 
@@ -49,11 +48,11 @@ public class CDConfig {
             wordsMc = loadJson("words_mc.json", new TypeToken<List<String>>(){}.getType(),
                     Arrays.asList("MINECRAFT", "DIAMANT", "CREEPER", "NETHER"));
             wordsHover = loadJson("words_hover.json", new TypeToken<List<String>>(){}.getType(),
-                    Arrays.asList("SECRET", "SURPRISE", "CACHÉ"));
+                    Arrays.asList("SECRET", "SURPRISE", "CACHE"));
 
+            // loadSettings() apres les autres — lit config.json qui contient la recompense
             loadSettings();
 
-            // Chargement des données dynamiques
             Map<UUID, Integer> rawLeaderboard = loadJson("leaderboard.json", new TypeToken<Map<UUID, Integer>>(){}.getType(), new HashMap<>());
             leaderboard.clear();
             leaderboard.putAll(rawLeaderboard);
@@ -62,16 +61,20 @@ public class CDConfig {
             nomsCache.clear();
             nomsCache.putAll(rawNames);
 
-            LOGGER.info("[ChatDynamics] Configuration chargée avec succès.");
+            LOGGER.info("[ChatDynamics] Config chargee ({} questions, item: {}, x{})",
+                    questions.size(),
+                    ForgeRegistries.ITEMS.getKey(itemRecompense),
+                    quantiteRecompense);
+
         } catch (Exception e) {
-            LOGGER.error("[ChatDynamics] Erreur lors du chargement des configs : ", e);
+            LOGGER.error("[ChatDynamics] Erreur chargement configs : ", e);
         }
     }
 
     private static void loadSettings() {
         Path path = CONFIG_DIR.resolve("config.json");
         if (!Files.exists(path)) {
-            saveConfig();
+            saveConfig(); // premiere fois : genere le fichier avec les valeurs par defaut
             return;
         }
 
@@ -79,15 +82,20 @@ public class CDConfig {
             JsonObject json = GSON.fromJson(reader, JsonObject.class);
             if (json == null) return;
 
-            if (json.has("delaiEntreEvents")) delaiEntreEvents = json.get("delaiEntreEvents").getAsInt();
-            if (json.has("delaiTimeout")) delaiTimeout = json.get("delaiTimeout").getAsInt();
-            if (json.has("rewardAmount")) quantiteRecompense = json.get("rewardAmount").getAsInt();
+            if (json.has("delaiEntreEvents")) delaiEntreEvents  = json.get("delaiEntreEvents").getAsInt();
+            if (json.has("delaiTimeout"))     delaiTimeout      = json.get("delaiTimeout").getAsInt();
+            if (json.has("rewardAmount"))     quantiteRecompense = json.get("rewardAmount").getAsInt();
 
             if (json.has("rewardItem")) {
                 String itemName = json.get("rewardItem").getAsString();
-                Item found = ForgeRegistries.ITEMS.getValue(new ResourceLocation(itemName));
-                if (found != null && found != Items.AIR) {
-                    itemRecompense = found;
+                ResourceLocation loc = ResourceLocation.tryParse(itemName);
+                if (loc != null) {
+                    Item found = ForgeRegistries.ITEMS.getValue(loc);
+                    if (found != null && found != Items.AIR) {
+                        itemRecompense = found;
+                    } else {
+                        LOGGER.warn("[ChatDynamics] Item '{}' introuvable, fallback diamond.", itemName);
+                    }
                 }
             }
         } catch (Exception e) {
@@ -95,6 +103,14 @@ public class CDConfig {
         }
     }
 
+    /**
+     * Sauvegarde SYNCHRONE intentionnelle.
+     *
+     * Appelee depuis /cd setreward — doit etre ecrite immediatement sur disque.
+     * Un CompletableFuture peut etre tue par l'arret de la JVM avant d'avoir
+     * termine, ce qui ferait perdre la recompense au prochain demarrage.
+     * Ne jamais passer cette methode en async.
+     */
     public static void saveConfig() {
         JsonObject json = new JsonObject();
         json.addProperty("delaiEntreEvents", delaiEntreEvents);
@@ -104,17 +120,27 @@ public class CDConfig {
         json.addProperty("rewardItem", loc != null ? loc.toString() : "minecraft:diamond");
         json.addProperty("rewardAmount", quantiteRecompense);
 
-        saveJson(CONFIG_DIR.resolve("config.json"), json);
+        Path path = CONFIG_DIR.resolve("config.json");
+        try (Writer writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
+            GSON.toJson(json, writer);
+            LOGGER.info("[ChatDynamics] config.json sauvegarde (item: {}, x{})", loc, quantiteRecompense);
+        } catch (IOException e) {
+            LOGGER.error("[ChatDynamics] Erreur sauvegarde config.json", e);
+        }
     }
 
+    /**
+     * Sauvegarde async du leaderboard — acceptable car frequente
+     * et une perte d'une ecriture est peu grave.
+     */
     public static void saveLeaderboardConfig() {
-        // On crée une copie locale pour la sauvegarde asynchrone
-        // afin d'éviter les erreurs si le leaderboard change pendant l'écriture.
         Map<UUID, Integer> copyLeaderboard = new HashMap<>(leaderboard);
-        Map<UUID, String> copyNames = new HashMap<>(nomsCache);
+        Map<UUID, String>  copyNames       = new HashMap<>(nomsCache);
 
-        saveJson(CONFIG_DIR.resolve("leaderboard.json"), copyLeaderboard);
-        saveJson(CONFIG_DIR.resolve("names.json"), copyNames);
+        CompletableFuture.runAsync(() -> {
+            saveJsonSync(CONFIG_DIR.resolve("leaderboard.json"), copyLeaderboard);
+            saveJsonSync(CONFIG_DIR.resolve("names.json"), copyNames);
+        });
     }
 
     private static <T> T loadJson(String fileName, Type type, T defaultValue) {
@@ -123,7 +149,7 @@ public class CDConfig {
             try (Writer writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
                 GSON.toJson(defaultValue, writer);
             } catch (IOException e) {
-                LOGGER.error("[ChatDynamics] Erreur création fichier défaut " + fileName, e);
+                LOGGER.error("[ChatDynamics] Erreur creation fichier defaut {}", fileName, e);
             }
             return defaultValue;
         }
@@ -131,18 +157,16 @@ public class CDConfig {
             T result = GSON.fromJson(reader, type);
             return result != null ? result : defaultValue;
         } catch (Exception e) {
-            LOGGER.error("[ChatDynamics] Erreur lecture " + fileName, e);
+            LOGGER.error("[ChatDynamics] Erreur lecture {}", fileName, e);
             return defaultValue;
         }
     }
 
-    private static void saveJson(Path path, Object data) {
-        CompletableFuture.runAsync(() -> {
-            try (Writer writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
-                GSON.toJson(data, writer);
-            } catch (IOException e) {
-                LOGGER.error("[ChatDynamics] Erreur sauvegarde critique " + path, e);
-            }
-        });
+    private static void saveJsonSync(Path path, Object data) {
+        try (Writer writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
+            GSON.toJson(data, writer);
+        } catch (IOException e) {
+            LOGGER.error("[ChatDynamics] Erreur sauvegarde {}", path, e);
+        }
     }
 }

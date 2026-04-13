@@ -279,6 +279,8 @@ public class ChatEventManager {
     private void lancerHoverEvent() {
         String mot = piocheMotsHover.tirer();
         if (mot == null) return;
+        this.reponseAttendue = mot;
+
         MutableComponent hoverContent = Component.literal("Mot à trouver : ")
                 .withStyle(net.minecraft.ChatFormatting.LIGHT_PURPLE)
                 .append(Component.literal(mot).withStyle(net.minecraft.ChatFormatting.BOLD, net.minecraft.ChatFormatting.GOLD));
