@@ -18,8 +18,12 @@ import net.minecraftforge.event.ServerChatEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.registries.ForgeRegistries;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import net.minecraft.resources.ResourceLocation;  // ← AJOUTE
+import net.minecraft.world.item.Item;            // ← AJOUTE
+import java.util.UUID;
 import net.minecraft.ChatFormatting;
 
 import java.util.*;
@@ -70,6 +74,9 @@ public class ChatEventManager {
     public void onServerStarted(ServerStartedEvent event) {
         this.server = event.getServer();
         holoStandUUIDs.clear();
+
+        CDConfig.validateRewardItem();
+        LOGGER.info("[ChatDynamics] Serveur démarré - validation item recompense effectuée");
     }
 
     @SubscribeEvent
@@ -108,7 +115,7 @@ public class ChatEventManager {
 
             float sec = (server.getTickCount() - tickLancement) / 20.0f;
             broadcast(Component.literal("§a" + p.getName().getString() + " §fa trouvé §e" + reponseAttendue + " §fen §e" + String.format("%.2f", sec) + "s !"));
-            p.addItem(new ItemStack(CDConfig.itemRecompense, CDConfig.quantiteRecompense));
+            p.addItem(new ItemStack(CDConfig.getItemRecompense(), CDConfig.quantiteRecompense));
             resetEvent(false);
             event.setCanceled(true);
         }
@@ -135,17 +142,29 @@ public class ChatEventManager {
                         .executes(c -> {
                             if (!(c.getSource().getEntity() instanceof ServerPlayer p)) return 0;
                             ItemStack stack = p.getMainHandItem();
+
                             if (stack.isEmpty()) {
                                 c.getSource().sendFailure(Component.literal("§cTu dois tenir un item en main !"));
                                 return 0;
                             }
-                            CDConfig.itemRecompense = stack.getItem();
+
+                            ResourceLocation loc = ForgeRegistries.ITEMS.getKey(stack.getItem());
+                            if (loc == null) {
+                                c.getSource().sendFailure(Component.literal("§cItem invalide !"));
+                                return 0;
+                            }
+
+                            // Reset validation (sera revalidé au prochain redémarrage)
+                            CDConfig.rewardItemValidated = false;
+                            CDConfig.rewardItemLocation = loc;
                             CDConfig.quantiteRecompense = stack.getCount();
-                            CDConfig.saveConfig(); // Sauvegarde permanente dans le JSON
-                            c.getSource().sendSuccess(() -> Component.literal("§aRécompense mise à jour : §e" + stack.getCount() + "x " + stack.getItem().getDescriptionId()), true);
+                            CDConfig.saveConfig();
+
+                            c.getSource().sendSuccess(() ->
+                                    Component.literal("§aRécompense mise à jour : §e" + stack.getCount() + "x §b" + loc +
+                                            " §7(sera validée au prochain redémarrage)"), true);
                             return 1;
-                        })
-                )
+                        }))
                 .then(Commands.literal("status").executes(c -> {
                     if (!eventActif) {
                         int resteSecondes = (CDConfig.delaiEntreEvents / TICKS_PAR_SECONDE) - timerAttente;
@@ -222,6 +241,20 @@ public class ChatEventManager {
                 .then(Commands.literal("reload").requires(s -> s.hasPermission(2)).executes(c -> {
                     reloadConfig();
                     c.getSource().sendSuccess(() -> Component.literal("§aConfig rechargée !"), true);
+                    return 1;
+                }))
+                .then(Commands.literal("validreward").requires(s -> s.hasPermission(2)).executes(c -> {
+                    CDConfig.validateRewardItem();
+                    c.getSource().sendSuccess(() -> Component.literal("§aValidation recompense effectuée !"), true);
+                    return 1;
+                }))
+                .then(Commands.literal("debugreward").requires(s -> s.hasPermission(2)).executes(c -> {
+                    Item item = CDConfig.getItemRecompense();
+                    ResourceLocation resolvedLoc = ForgeRegistries.ITEMS.getKey(item);
+                    c.getSource().sendSuccess(() ->
+                            Component.literal("§6[DEBUG] Item: §f" + CDConfig.rewardItemLocation +
+                                    " §7| Validé: §a" + CDConfig.rewardItemValidated +
+                                    " §7| Résolu: §e" + (resolvedLoc != null ? resolvedLoc : "NULL")), false);
                     return 1;
                 }))
         );
